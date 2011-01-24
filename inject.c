@@ -1,3 +1,5 @@
+// I think this file has more useless features than the Toshiba Tablet.
+
 #include "inject.h"
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -8,7 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <stdio.h> // xx remove this
+#include <stdio.h>
 
 struct dyld_all_image_infos {
     uint32_t version;
