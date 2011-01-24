@@ -115,6 +115,7 @@ struct symtab_bundle {
 #define SWAP(x) (swap ? __builtin_bswap32(x) : (x))
 #define SWAP64(x) (swap ? __builtin_bswap64(x) : (x))
 
+#ifndef __arm__
 static inline void handle_sym(const char *sym, uint32_t size, mach_vm_address_t value, struct addr_bundle *bundle) {
     switch(sym[1]) {
     case 'd':
@@ -128,9 +129,11 @@ static inline void handle_sym(const char *sym, uint32_t size, mach_vm_address_t 
 
 static kern_return_t find_symtab_addrs(uint32_t ncmds, mach_vm_size_t sizeofcmds, struct load_command *cmds, bool swap, size_t nlist_size, struct symtab_bundle *symtab) {
     struct load_command *lc;
-    uint32_t symoff = 0, stroff;
+    uint32_t symoff = 0, stroff = 0;
     uint32_t cmdsleft;
     mach_vm_size_t accumulated_sizeofcmds = 0;
+
+    memset(symtab, 0, sizeof(*symtab));
 
     lc = cmds;
     cmdsleft = ncmds;
@@ -185,17 +188,22 @@ static kern_return_t find_symtab_addrs(uint32_t ncmds, mach_vm_size_t sizeofcmds
 
     return 0;
 }
-
+#endif
 
 static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bundle *addrs) {
 #ifdef __arm__
     *cputype = CPU_TYPE_ARM;
-    addrs->dlopen = (mach_vmess_t) &dlopen;
-    addrs->mach_thread_self = (mach_vmess_t) &mach_thread_self;
-    addrs->thread_terminate = (mach_vmess_t) &thread_terminate;
+    addrs->dlopen = (mach_vm_address_t) &dlopen;
+    addrs->syscall = (mach_vm_address_t) &syscall;
     return 0;
 #else
     kern_return_t kr = 0;
+
+    char *strs = 0; void *syms = 0;
+    struct load_command *cmds = 0;
+
+    *cputype = 0; // make the optimizer happy
+
     task_dyld_info_data_t info;
     mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
     union {
@@ -230,15 +238,15 @@ static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bun
     size_t nlist_size = mh64 ? sizeof(struct nlist_64) : sizeof(struct nlist);
 
     mach_vm_size_t sizeofcmds = SWAP(mach_hdr.sizeofcmds);
-    struct load_command *cmds = malloc(sizeofcmds);
+    cmds = malloc(sizeofcmds);
 
     TRY(mach_vm_read_overwrite(task, dyldImageLoadAddress + (mh64 ? sizeof(struct mach_header_64) : sizeof(struct mach_header)), sizeofcmds, address_cast(cmds), &sizeofcmds));
 
     struct symtab_bundle symtab;
     TRY(find_symtab_addrs(mach_hdr.ncmds, sizeofcmds, cmds, swap, nlist_size, &symtab));
     
-    char *strs = malloc(symtab.strsize);
-    void *syms = malloc(symtab.nsyms * nlist_size);
+    strs = malloc(symtab.strsize);
+    syms = malloc(symtab.nsyms * nlist_size);
 
     TRY(mach_vm_read_overwrite(task, symtab.straddr, symtab.strsize, address_cast(strs), &data_size));
     TRY(mach_vm_read_overwrite(task, symtab.symaddr, symtab.nsyms * nlist_size, address_cast(syms), &data_size));
@@ -312,6 +320,7 @@ kern_return_t inject(pid_t pid, const char *path) {
 
     switch(cputype) {
     case CPU_TYPE_ARM:
+        (void) args_64;
         memcpy(&state.arm.r[0], args_32 + 1, 4*4);
         TRY(mach_vm_write(task, stack_end, address_cast(args_32 + 5), 2*4));
 
@@ -321,6 +330,7 @@ kern_return_t inject(pid_t pid, const char *path) {
         state_flavor = ARM_THREAD_STATE;
         state_count = sizeof(state.arm) / sizeof(state.nat);
         break;
+#ifndef __arm__
     case CPU_TYPE_X86:
         TRY(mach_vm_write(task, stack_end, address_cast(args_32), 7*4));
 
@@ -353,6 +363,7 @@ kern_return_t inject(pid_t pid, const char *path) {
         state_flavor = PPC_THREAD_STATE64;
         state_count = sizeof(state.ppc) / sizeof(state.nat);
         break;
+#endif
     default:
         abort();
     }
@@ -395,15 +406,16 @@ kern_return_t inject(pid_t pid, const char *path) {
         if(msg.thread.name == thread) {
             TRY(thread_terminate(thread));
         } else {
-            bool cond;
+            bool cond = false;
 
             switch(cputype) {
             case CPU_TYPE_ARM: cond = (state.arm.pc & ~1) == 0xdeadbeee; break;
-                state.arm.pc = (uint32_t) addrs.dlopen;
+#ifndef __arm__
             case CPU_TYPE_X86: cond = state.x86.eip == 0xdeadbeef; break;
             case CPU_TYPE_X86_64: cond = state.x64.rip == 0xdeadbeef; break;
             case CPU_TYPE_POWERPC:
             case CPU_TYPE_POWERPC64: cond = state.ppc.srr0 == 0xdeadbeef; break;
+#endif
             }
 
             if(!cond) {
@@ -416,7 +428,9 @@ kern_return_t inject(pid_t pid, const char *path) {
                 case CPU_TYPE_ARM:
                     state.arm.r[0] = (uint32_t) stack_address;
                     state.arm.r[1] = RTLD_LAZY;
+                    state.arm.pc = (uint32_t) addrs.dlopen;
                     break;
+#ifndef __arm__
                 case CPU_TYPE_X86:
                     {
                         uint32_t stack_stuff[3] = {0xdeadbeef, (uint32_t) stack_address, RTLD_LAZY};
@@ -441,6 +455,7 @@ kern_return_t inject(pid_t pid, const char *path) {
                     state.ppc.r[4] = RTLD_LAZY;
                     state.ppc.lr = 0xdeadbeef;
                     break;
+#endif
                 }
 
                 struct exception_reply reply;
