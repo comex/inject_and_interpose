@@ -1,7 +1,6 @@
 #include <unistd.h>
 #include <mach/kern_return.h>
 
-
 kern_return_t inject(pid_t pid, const char *path);
 
 // The behavior is synchronous: when it returns, constructors have

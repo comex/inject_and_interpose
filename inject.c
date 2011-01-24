@@ -70,7 +70,6 @@ struct ppc_thread_state64 {
     uint32_t vrsave;
 };
 
-// covers multiple flavors - some contain the state but not all
 #pragma pack(4)
 struct exception_message {
     mach_msg_header_t Head;
@@ -133,14 +132,12 @@ static kern_return_t find_symtab_addrs(uint32_t ncmds, mach_vm_size_t sizeofcmds
     struct load_command *lc;
     uint32_t symoff = 0, stroff = 0;
     uint32_t cmdsleft;
-    mach_vm_size_t accumulated_sizeofcmds = 0;
 
     memset(symtab, 0, sizeof(*symtab));
 
     lc = cmds;
-    cmdsleft = ncmds;
-    while(cmdsleft--) {
-        if((accumulated_sizeofcmds += SWAP(lc->cmdsize)) > sizeofcmds) {
+    for(cmdsleft = ncmds; cmdsleft--;) {
+        if((sizeofcmds -= SWAP(lc->cmdsize)) < 0) {
             // the mach file is invalid
             return KERN_INVALID_ARGUMENT;
         }
@@ -161,25 +158,18 @@ static kern_return_t find_symtab_addrs(uint32_t ncmds, mach_vm_size_t sizeofcmds
         return KERN_INVALID_ARGUMENT;
     }
 
+#define CATCH(SWAP, off, size, addr) if(SWAP(sc->fileoff) <= (off) && (SWAP(sc->fileoff) + SWAP(sc->filesize)) >= ((off) + (size))) (addr) = SWAP(sc->vmaddr) + (off) - SWAP(sc->fileoff);
+
     lc = cmds;
-    cmdsleft = ncmds;
-    while(cmdsleft--) {
+    for(cmdsleft = ncmds; cmdsleft--;) {
         if(SWAP(lc->cmd) == LC_SEGMENT) {
             struct segment_command *sc = (void *) lc;
-            if(SWAP(sc->fileoff) < symoff && (SWAP(sc->fileoff) + SWAP(sc->filesize)) >= (symoff + symtab->nsyms * nlist_size)) {
-                symtab->symaddr = sc->vmaddr + symoff - sc->fileoff; 
-            }
-            if(SWAP(sc->fileoff) < stroff && (SWAP(sc->fileoff) + SWAP(sc->filesize)) >= (stroff + symtab->strsize)) {
-                symtab->straddr = sc->vmaddr + stroff - sc->fileoff; 
-            }
+            CATCH(SWAP, symoff, symtab->nsyms * nlist_size, symtab->symaddr);
+            CATCH(SWAP, stroff, symtab->strsize, symtab->straddr);
         } else if(SWAP(lc->cmd) == LC_SEGMENT_64) {
             struct segment_command_64 *sc = (void *) lc;
-            if(SWAP64(sc->fileoff) < symoff && (SWAP64(sc->fileoff) + SWAP64(sc->filesize)) >= (symoff + symtab->nsyms * nlist_size)) {
-                symtab->symaddr = sc->vmaddr + symoff - sc->fileoff; 
-            }
-            if(SWAP64(sc->fileoff) < stroff && (SWAP64(sc->fileoff) + SWAP64(sc->filesize)) >= (stroff + symtab->strsize)) {
-                symtab->straddr = sc->vmaddr + stroff - sc->fileoff; 
-            }
+            CATCH(SWAP64, symoff, symtab->nsyms * nlist_size, symtab->symaddr);
+            CATCH(SWAP64, stroff, symtab->strsize, symtab->straddr);
         }
         lc = (void *) ((char *) lc + SWAP(lc->cmdsize));
     }
@@ -358,6 +348,7 @@ kern_return_t inject(pid_t pid, const char *path) {
         break;
     case CPU_TYPE_POWERPC:
     case CPU_TYPE_POWERPC64:
+        fprintf(stderr, "yep it's ppc\n");
         state.ppc.r[1] = stack_end;
         memcpy(&state.ppc.r[3], args_64 + 1, 6*8);
         state.ppc.srr0 = addrs.syscall;
@@ -395,7 +386,7 @@ kern_return_t inject(pid_t pid, const char *path) {
     while(1) {
         struct exception_message msg;
         TRY(mach_msg_overwrite(NULL, MACH_RCV_MSG, 0, sizeof(msg), exc, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL, (void *) &msg, sizeof(msg)));
-        printf("got a message\n");
+        //fprintf(stderr, "got a message\n");
         if(!(msg.Head.msgh_bits & MACH_MSGH_BITS_COMPLEX) ||
            (msg.msgh_body.msgh_descriptor_count == 0) ||
            (msg.Head.msgh_size < offsetof(struct exception_message, old_state)) ||
@@ -421,6 +412,8 @@ kern_return_t inject(pid_t pid, const char *path) {
             }
 
             if(!cond) {
+                // let the normal crash mechanism handle it
+                task_set_exception_ports(task, em[0], eh[0], eb[0], ef[0]);
                 FAIL(KERN_FAILURE);
             } else if(started_dlopen) {
                 TRY(thread_terminate(msg.thread.name));

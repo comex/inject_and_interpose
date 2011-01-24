@@ -6,9 +6,9 @@ endif
 
 all: testlib tester
 
-testlib: testlib.c Makefile
-	$(GCC) $(ARCH) -dynamiclib -o testlib.dylib testlib.c
-tester: tester.c ../*.c ../*.h Makefile
-	$(GCC) -O3 -g3 -o tester -I.. tester.c ../*.c ../*.h -Wall -Wno-parentheses
+testlib: testlib.c ../interpose.c ../interpose.h Makefile
+	$(GCC) $(ARCH) -dynamiclib -I.. -o testlib.dylib testlib.c ../interpose.c -Wall -Wno-parentheses
+tester: tester.c ../inject.c ../inject.h Makefile
+	$(GCC) -O3 -g3 -o tester -I.. tester.c ../inject.c -Wall -Wno-parentheses
 clean:
 	rm -f tester testlib.dylib
