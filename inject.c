@@ -95,7 +95,7 @@ struct exception_reply {
 };
 #pragma pack()
 
-static const vm_size_t stack_size = 32*1024;
+static const mach_vm_size_t stack_size = 32*1024;
 
 struct addr_bundle {
     mach_vm_address_t dlopen;
@@ -280,7 +280,10 @@ kern_return_t inject(pid_t pid, const char *path) {
     char *path_real = realpath(path, 0);
     if(!path_real) return KERN_INVALID_ARGUMENT;
     
+    mach_port_t exc = 0;
     task_t task = 0;
+    thread_act_t thread = 0;
+    
     TRY(task_for_pid(mach_task_self(), (int) pid, &task));
 
     cpu_type_t cputype;
@@ -318,6 +321,7 @@ kern_return_t inject(pid_t pid, const char *path) {
 
         state.arm.sp = (uint32_t) stack_end;
         state.arm.pc = (uint32_t) addrs.syscall;
+        state.arm.lr = (uint32_t) args_32[0];
 
         state_flavor = ARM_THREAD_STATE;
         state_count = sizeof(state.arm) / sizeof(state.nat);
@@ -361,11 +365,10 @@ kern_return_t inject(pid_t pid, const char *path) {
         abort();
     }
 
-    mach_port_t exc;
+    TRY(thread_create(task, &thread));
+
     mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &exc);
 
-    thread_act_t thread = 0;
-    TRY(thread_create(task, &thread));
     TRY(mach_port_insert_right(mach_task_self(), exc, exc, MACH_MSG_TYPE_MAKE_SEND));
     
     exception_mask_t em[2];
@@ -471,13 +474,7 @@ kern_return_t inject(pid_t pid, const char *path) {
         }
     }
 
-    TRY(task_set_exception_ports(task, em[0], eh[0], eb[0], ef[0]));
-
-    mach_port_deallocate(mach_task_self(), thread);
-    mach_port_deallocate(mach_task_self(), task);
-
-    return 0;    
-
+    kr = 0;
 bad:
     if(stack_address) vm_deallocate(task, stack_address, stack_size);
     if(thread) {
