@@ -352,7 +352,7 @@ kern_return_t inject(pid_t pid, const char *path) {
         break;
     case CPU_TYPE_POWERPC:
     case CPU_TYPE_POWERPC64:
-        fprintf(stderr, "yep it's ppc\n");
+        fprintf(stderr, "ppc is untested\n");
         state.ppc.r[1] = stack_end;
         memcpy(&state.ppc.r[3], args_64 + 1, 6*8);
         state.ppc.srr0 = addrs.syscall;
