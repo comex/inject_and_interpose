@@ -180,15 +180,8 @@ static kern_return_t find_symtab_addrs(uint32_t ncmds, mach_vm_size_t sizeofcmds
 
     return 0;
 }
-#endif
 
 static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bundle *addrs) {
-#ifdef __arm__
-    *cputype = CPU_TYPE_ARM;
-    addrs->dlopen = (mach_vm_address_t) &dlopen;
-    addrs->syscall = (mach_vm_address_t) &syscall;
-    return 0;
-#else
     kern_return_t kr = 0;
 
     char *strs = 0; void *syms = 0;
@@ -271,8 +264,16 @@ bad:
     if(strs) free(strs);
     if(syms) free(syms);
     return kr;
-#endif
 }
+
+#else  // __arm__
+static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bundle *addrs) {
+    *cputype = CPU_TYPE_ARM;
+    addrs->dlopen = (mach_vm_address_t) &dlopen;
+    addrs->syscall = (mach_vm_address_t) &syscall;
+    return 0;
+}
+#endif
 
 kern_return_t inject(pid_t pid, const char *path) {
     kern_return_t kr = 0;
@@ -314,6 +315,7 @@ kern_return_t inject(pid_t pid, const char *path) {
     memset(&state, 0, sizeof(state));
 
     switch(cputype) {
+#ifdef __arm__
     case CPU_TYPE_ARM:
         (void) args_64;
         memcpy(&state.arm.r[0], args_32 + 1, 4*4);
@@ -326,7 +328,8 @@ kern_return_t inject(pid_t pid, const char *path) {
         state_flavor = ARM_THREAD_STATE;
         state_count = sizeof(state.arm) / sizeof(state.nat);
         break;
-#ifndef __arm__
+#endif
+#if defined(__i386__) || defined(__x86_64__)
     case CPU_TYPE_X86:
         TRY(mach_vm_write(task, stack_end, address_cast(args_32), 7*4));
 
@@ -350,6 +353,8 @@ kern_return_t inject(pid_t pid, const char *path) {
         state_flavor = x86_THREAD_STATE64;
         state_count = sizeof(state.x64) / sizeof(state.nat);
         break;
+#endif
+#ifdef __ppc__
     case CPU_TYPE_POWERPC:
     case CPU_TYPE_POWERPC64:
         fprintf(stderr, "ppc is untested\n");
@@ -405,10 +410,14 @@ kern_return_t inject(pid_t pid, const char *path) {
             bool cond = false;
 
             switch(cputype) {
+#ifdef __arm__
             case CPU_TYPE_ARM: cond = (state.arm.pc & ~1) == 0xdeadbeee; break;
-#ifndef __arm__
+#endif
+#if defined(__i386__) || defined(__x86_64__)
             case CPU_TYPE_X86: cond = state.x86.eip == 0xdeadbeef; break;
             case CPU_TYPE_X86_64: cond = state.x64.rip == 0xdeadbeef; break;
+#endif
+#ifdef __ppc__
             case CPU_TYPE_POWERPC:
             case CPU_TYPE_POWERPC64: cond = state.ppc.srr0 == 0xdeadbeef; break;
 #endif
@@ -423,12 +432,14 @@ kern_return_t inject(pid_t pid, const char *path) {
                 break;
             } else {
                 switch(cputype) {
+#ifdef __arm__
                 case CPU_TYPE_ARM:
                     state.arm.r[0] = (uint32_t) stack_address;
                     state.arm.r[1] = RTLD_LAZY;
                     state.arm.pc = (uint32_t) addrs.dlopen;
                     break;
-#ifndef __arm__
+#endif
+#if defined(__i386__) || defined(__x86_64__)
                 case CPU_TYPE_X86:
                     {
                         uint32_t stack_stuff[3] = {0xdeadbeef, (uint32_t) stack_address, RTLD_LAZY};
@@ -445,6 +456,8 @@ kern_return_t inject(pid_t pid, const char *path) {
                     state.x64.rdi = stack_address;
                     state.x64.rsi = RTLD_LAZY;
                     break;
+#endif
+#ifdef __ppc__
                 case CPU_TYPE_POWERPC:
                 case CPU_TYPE_POWERPC64:
                     cond = state.ppc.srr0 == 0xdeadbeef;
