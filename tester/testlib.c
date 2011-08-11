@@ -3,7 +3,8 @@
 #include <interpose.h>
 
 int fake_puts(const char *s) {
-    printf("whee %s\n", s);
+    puts("whee");
+    puts(s);
     return 0;
 }
 

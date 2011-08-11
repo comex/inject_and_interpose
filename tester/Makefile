@@ -13,4 +13,4 @@ tester: tester.c ../inject.c ../inject.h Makefile
 testputs: testputs.c Makefile
 	$(GCC) -o testputs testputs.c
 clean:
-	rm -f tester testlib.dylib
+	rm -f tester testlib.dylib testputs

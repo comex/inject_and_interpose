@@ -127,42 +127,59 @@ static inline void handle_sym(const char *sym, uint32_t size, mach_vm_address_t 
     }
 }
 
-static kern_return_t find_symtab_addrs(uint32_t ncmds, mach_vm_size_t sizeofcmds, struct load_command *cmds, bool swap, size_t nlist_size, struct symtab_bundle *symtab) {
+static kern_return_t find_symtab_addrs(mach_vm_address_t dyldImageLoadAddress, uint32_t ncmds, mach_vm_size_t sizeofcmds, struct load_command *cmds, bool swap, size_t nlist_size, struct symtab_bundle *symtab, mach_vm_address_t *slide_) {
     struct load_command *lc;
     uint32_t symoff = 0, stroff = 0;
     uint32_t cmdsleft;
 
     memset(symtab, 0, sizeof(*symtab));
 
+    mach_vm_address_t vma = 0;
+
     lc = cmds;
     for(cmdsleft = ncmds; cmdsleft--;) {
-        if((sizeofcmds -= SWAP(lc->cmdsize)) < 0) {
+        uint32_t cmdsize = SWAP(lc->cmdsize);
+        if(sizeofcmds < sizeof(struct load_command) || sizeofcmds < cmdsize) {
             // the mach file is invalid
             return KERN_INVALID_ARGUMENT;
         }
-        if(SWAP(lc->cmd) == LC_SYMTAB) {
+        sizeofcmds -= cmdsize;
+        if(!vma && SWAP(lc->cmd) == LC_SEGMENT) {
+            struct segment_command *sc = (void *) lc;
+            if(cmdsize < sizeof(*sc)) return KERN_INVALID_ARGUMENT;
+            vma = SWAP(sc->vmaddr);
+        } else if(!vma && SWAP(lc->cmd) == LC_SEGMENT_64) {
+            struct segment_command_64 *sc = (void *) lc;
+            if(cmdsize < sizeof(*sc)) return KERN_INVALID_ARGUMENT;
+            vma = SWAP64(sc->vmaddr);
+        } else if(SWAP(lc->cmd) == LC_SYMTAB) {
             struct symtab_command *sc = (void *) lc;
+            if(cmdsize < sizeof(*sc)) return KERN_INVALID_ARGUMENT;
             symoff = SWAP(sc->symoff);
             symtab->nsyms = SWAP(sc->nsyms);
             stroff = SWAP(sc->stroff);
             symtab->strsize = SWAP(sc->strsize);
-            if(symtab->strsize >= 1000000 || symtab->nsyms >= 1000000) {
+            if(symtab->strsize >= 10000000 || symtab->nsyms >= 10000000) {
                 return KERN_INVALID_ARGUMENT;
             }
         }
         lc = (void *) ((char *) lc + SWAP(lc->cmdsize));
     }
 
-    if(!symoff) {
+    if(!symoff || !vma) {
         return KERN_INVALID_ARGUMENT;
     }
 
-#define CATCH(SWAP, off, size, addr) if(SWAP(sc->fileoff) <= (off) && (SWAP(sc->fileoff) + SWAP(sc->filesize)) >= ((off) + (size))) (addr) = SWAP(sc->vmaddr) + (off) - SWAP(sc->fileoff);
+    mach_vm_address_t slide = dyldImageLoadAddress - vma;
+    *slide_ = slide;
+
+#define CATCH(SWAP, off, size, addr) if(SWAP(sc->fileoff) + SWAP(sc->filesize) < SWAP(sc->fileoff)) return KERN_INVALID_ARGUMENT; if(SWAP(sc->fileoff) <= (off) && (SWAP(sc->fileoff) + SWAP(sc->filesize) - (off)) >= (size)) (addr) = SWAP(sc->vmaddr) + slide + (off) - SWAP(sc->fileoff);
 
     lc = cmds;
     for(cmdsleft = ncmds; cmdsleft--;) {
         if(SWAP(lc->cmd) == LC_SEGMENT) {
             struct segment_command *sc = (void *) lc;
+            if(!vma) vma = SWAP(sc->vmaddr);
             CATCH(SWAP, symoff, symtab->nsyms * nlist_size, symtab->symaddr);
             CATCH(SWAP, stroff, symtab->strsize, symtab->straddr);
         } else if(SWAP(lc->cmd) == LC_SEGMENT_64) {
@@ -204,15 +221,14 @@ static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bun
 
     TRY(mach_vm_read_overwrite(task, info.all_image_info_addr, data_size, address_cast(&u), &data_size));
 
-    if(u.data.version == 1) return KERN_NO_SPACE;
+    if(u.data.version <= 1) return KERN_NO_SPACE;
 
 #if defined(__i386__) || defined(__x86_64__) || defined(__ppc__)
-    bool proc64 = false;
-#else
     // Try to guess whether the process is 64-bit,
-    bool proc64 = info.all_image_info_addr > 0xffffffff;
+    bool proc64 = info.all_image_info_addr > 0;
+#else
+    bool proc64 = false;
 #endif
-
     mach_vm_address_t dyldImageLoadAddress = proc64 ? u.data64.dyldImageLoadAddress : u.data.dyldImageLoadAddress;
 
     struct mach_header mach_hdr;
@@ -230,8 +246,9 @@ static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bun
 
     TRY(mach_vm_read_overwrite(task, dyldImageLoadAddress + (mh64 ? sizeof(struct mach_header_64) : sizeof(struct mach_header)), sizeofcmds, address_cast(cmds), &sizeofcmds));
 
+    mach_vm_address_t slide;
     struct symtab_bundle symtab;
-    TRY(find_symtab_addrs(mach_hdr.ncmds, sizeofcmds, cmds, swap, nlist_size, &symtab));
+    TRY(find_symtab_addrs(dyldImageLoadAddress, mach_hdr.ncmds, sizeofcmds, cmds, swap, nlist_size, &symtab, &slide));
     
     strs = malloc(symtab.strsize);
     syms = malloc(symtab.nsyms * nlist_size);
@@ -246,7 +263,7 @@ static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bun
         while(symtab.nsyms--) {
             uint32_t strx = (uint32_t) SWAP(nl->n_un.n_strx);
             if(strx >= symtab.strsize) FAIL(KERN_FAILURE);
-            handle_sym(strs + strx, symtab.strsize - strx, (mach_vm_address_t) SWAP64(nl->n_value), addrs);
+            handle_sym(strs + strx, symtab.strsize - strx, (mach_vm_address_t) SWAP64(nl->n_value) + slide, addrs);
             nl++;
         }
     } else {
@@ -254,7 +271,7 @@ static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bun
         while(symtab.nsyms--) {
             uint32_t strx = SWAP(nl->n_un.n_strx);
             if(strx >= symtab.strsize) FAIL(KERN_FAILURE);
-            handle_sym(strs + strx, symtab.strsize - strx, (mach_vm_address_t) SWAP(nl->n_value), addrs);
+            handle_sym(strs + strx, symtab.strsize - strx, (mach_vm_address_t) SWAP(nl->n_value) + slide, addrs);
             nl++;
         }
     }
@@ -307,6 +324,8 @@ kern_return_t inject(pid_t pid, const char *path) {
 	mach_msg_type_number_t state_count;
 
     memset(&state, 0, sizeof(state));
+
+    printf("dlopen = %llx\n", addrs.dlopen);
 
     switch(cputype) {
 #ifdef __arm__
