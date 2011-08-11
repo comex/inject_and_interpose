@@ -116,7 +116,6 @@ struct symtab_bundle {
 #define SWAP(x) (swap ? __builtin_bswap32(x) : (x))
 #define SWAP64(x) (swap ? __builtin_bswap64(x) : (x))
 
-#ifndef __arm__
 static inline void handle_sym(const char *sym, uint32_t size, mach_vm_address_t value, struct addr_bundle *bundle) {
     switch(sym[1]) {
     case 'd':
@@ -207,8 +206,12 @@ static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bun
 
     if(u.data.version == 1) return KERN_NO_SPACE;
 
+#if defined(__i386__) || defined(__x86_64__) || defined(__ppc__)
+    bool proc64 = false;
+#else
     // Try to guess whether the process is 64-bit,
     bool proc64 = info.all_image_info_addr > 0xffffffff;
+#endif
 
     mach_vm_address_t dyldImageLoadAddress = proc64 ? u.data64.dyldImageLoadAddress : u.data.dyldImageLoadAddress;
 
@@ -265,15 +268,6 @@ bad:
     if(syms) free(syms);
     return kr;
 }
-
-#else  // __arm__
-static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bundle *addrs) {
-    *cputype = CPU_TYPE_ARM;
-    addrs->dlopen = (mach_vm_address_t) &dlopen;
-    addrs->syscall = (mach_vm_address_t) &syscall;
-    return 0;
-}
-#endif
 
 kern_return_t inject(pid_t pid, const char *path) {
     kern_return_t kr = 0;
