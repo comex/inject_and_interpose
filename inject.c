@@ -450,6 +450,7 @@ kern_return_t inject(pid_t pid, const char *path) {
                     state.arm.r[0] = (uint32_t) stack_address;
                     state.arm.r[1] = RTLD_LAZY;
                     state.arm.pc = (uint32_t) addrs.dlopen;
+                    state.arm.lr = 0xdeadbeef;
                     break;
 #endif
 #if defined(__i386__) || defined(__x86_64__)
