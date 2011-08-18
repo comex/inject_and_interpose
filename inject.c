@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
+#include <limits.h>
 
 struct dyld_all_image_infos {
     uint32_t version;
@@ -110,8 +112,9 @@ struct symtab_bundle {
 };
 
 
-#define FAIL(x) do { kr = x; fprintf(stderr, "fail on line %d\n", __LINE__); goto bad; } while(0)
 #define TRY(x) do { if(kr = x) { fprintf(stderr, "fail on line %d: %s\n", __LINE__, #x); goto bad; } } while(0)
+#define ASSERT(x) ASSERTR(x, KERN_INVALID_ARGUMENT)
+#define ASSERTR(x, err) do { if(!(x)) { fprintf(stderr, "assertion failed on line %d: %s\n", __LINE__, #x); kr = err; goto bad; } } while(0)
 #define address_cast(x) ((mach_vm_address_t) (uintptr_t) (x))
 #define SWAP(x) (swap ? __builtin_bswap32(x) : (x))
 #define SWAP64(x) (swap ? __builtin_bswap64(x) : (x))
@@ -128,6 +131,7 @@ static inline void handle_sym(const char *sym, uint32_t size, mach_vm_address_t 
 }
 
 static kern_return_t find_symtab_addrs(mach_vm_address_t dyldImageLoadAddress, uint32_t ncmds, mach_vm_size_t sizeofcmds, struct load_command *cmds, bool swap, size_t nlist_size, struct symtab_bundle *symtab, mach_vm_address_t *slide_) {
+    kern_return_t kr = 0;
     struct load_command *lc;
     uint32_t symoff = 0, stroff = 0;
     uint32_t cmdsleft;
@@ -139,41 +143,35 @@ static kern_return_t find_symtab_addrs(mach_vm_address_t dyldImageLoadAddress, u
     lc = cmds;
     for(cmdsleft = ncmds; cmdsleft--;) {
         uint32_t cmdsize = SWAP(lc->cmdsize);
-        if(sizeofcmds < sizeof(struct load_command) || sizeofcmds < cmdsize) {
-            // the mach file is invalid
-            return KERN_INVALID_ARGUMENT;
-        }
+        ASSERT(sizeofcmds >= sizeof(struct load_command) && sizeofcmds >= cmdsize);
         sizeofcmds -= cmdsize;
         if(!vma && SWAP(lc->cmd) == LC_SEGMENT) {
             struct segment_command *sc = (void *) lc;
-            if(cmdsize < sizeof(*sc)) return KERN_INVALID_ARGUMENT;
+            ASSERT(cmdsize >= sizeof(*sc));
             vma = SWAP(sc->vmaddr);
         } else if(!vma && SWAP(lc->cmd) == LC_SEGMENT_64) {
             struct segment_command_64 *sc = (void *) lc;
-            if(cmdsize < sizeof(*sc)) return KERN_INVALID_ARGUMENT;
+            ASSERT(cmdsize >= sizeof(*sc));
             vma = SWAP64(sc->vmaddr);
         } else if(SWAP(lc->cmd) == LC_SYMTAB) {
             struct symtab_command *sc = (void *) lc;
-            if(cmdsize < sizeof(*sc)) return KERN_INVALID_ARGUMENT;
+            ASSERT(cmdsize >= sizeof(*sc));
             symoff = SWAP(sc->symoff);
             symtab->nsyms = SWAP(sc->nsyms);
             stroff = SWAP(sc->stroff);
             symtab->strsize = SWAP(sc->strsize);
-            if(symtab->strsize >= 10000000 || symtab->nsyms >= 10000000) {
-                return KERN_INVALID_ARGUMENT;
-            }
+            ASSERT(symtab->strsize < 10000000 && symtab->nsyms < 10000000);
         }
         lc = (void *) ((char *) lc + SWAP(lc->cmdsize));
     }
 
-    if(!symoff || !vma) {
-        return KERN_INVALID_ARGUMENT;
-    }
+    ASSERT(symoff);
+    ASSERT(vma);
 
     mach_vm_address_t slide = dyldImageLoadAddress - vma;
     *slide_ = slide;
 
-#define CATCH(SWAP, off, size, addr) if(SWAP(sc->fileoff) + SWAP(sc->filesize) < SWAP(sc->fileoff)) return KERN_INVALID_ARGUMENT; if(SWAP(sc->fileoff) <= (off) && (SWAP(sc->fileoff) + SWAP(sc->filesize) - (off)) >= (size)) (addr) = SWAP(sc->vmaddr) + slide + (off) - SWAP(sc->fileoff);
+#define CATCH(SWAP, off, size, addr) ASSERT(SWAP(sc->fileoff) + SWAP(sc->filesize) >= SWAP(sc->fileoff)); if(SWAP(sc->fileoff) <= (off) && (SWAP(sc->fileoff) + SWAP(sc->filesize) - (off)) >= (size)) (addr) = SWAP(sc->vmaddr) + slide + (off) - SWAP(sc->fileoff);
 
     lc = cmds;
     for(cmdsleft = ncmds; cmdsleft--;) {
@@ -190,11 +188,11 @@ static kern_return_t find_symtab_addrs(mach_vm_address_t dyldImageLoadAddress, u
         lc = (void *) ((char *) lc + SWAP(lc->cmdsize));
     }
 
-    if(!symtab->straddr || !symtab->symaddr) {
-        return KERN_INVALID_ARGUMENT;
-    }
+    ASSERT(symtab->straddr);
+    ASSERT(symtab->symaddr);
 
-    return 0;
+bad:
+    return kr;
 }
 
 static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bundle *addrs) {
@@ -262,7 +260,7 @@ static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bun
         const struct nlist_64 *nl = syms;
         while(symtab.nsyms--) {
             uint32_t strx = (uint32_t) SWAP(nl->n_un.n_strx);
-            if(strx >= symtab.strsize) FAIL(KERN_FAILURE);
+            ASSERT(strx < symtab.strsize);
             handle_sym(strs + strx, symtab.strsize - strx, (mach_vm_address_t) SWAP64(nl->n_value) + slide, addrs);
             nl++;
         }
@@ -270,15 +268,15 @@ static kern_return_t get_stuff(task_t task, cpu_type_t *cputype, struct addr_bun
         const struct nlist *nl = syms;
         while(symtab.nsyms--) {
             uint32_t strx = SWAP(nl->n_un.n_strx);
-            if(strx >= symtab.strsize) FAIL(KERN_FAILURE);
+            ASSERT(strx < symtab.strsize);
             handle_sym(strs + strx, symtab.strsize - strx, (mach_vm_address_t) SWAP(nl->n_value) + slide, addrs);
             nl++;
         }
     }
 
-    if(!addrs->dlopen || !addrs->syscall) FAIL(KERN_INVALID_ADDRESS);
+    ASSERT(addrs->dlopen);
+    ASSERT(addrs->syscall);
 
-    kr = 0;
 bad:
     if(cmds) free(cmds);
     if(strs) free(strs);
@@ -288,13 +286,17 @@ bad:
 
 kern_return_t inject(pid_t pid, const char *path) {
     kern_return_t kr = 0;
-
-    char *path_real = realpath(path, 0);
-    if(!path_real) return KERN_INVALID_ARGUMENT;
     
+    mach_vm_address_t stack_address = 0;
     mach_port_t exc = 0;
     task_t task = 0;
     thread_act_t thread = 0;
+
+    char path_real[PATH_MAX];
+    if(!realpath(path, path_real)) {
+        perror("realpath");
+        ASSERT(0);
+    }
     
     TRY(task_for_pid(mach_task_self(), (int) pid, &task));
 
@@ -302,7 +304,6 @@ kern_return_t inject(pid_t pid, const char *path) {
     struct addr_bundle addrs;
     TRY(get_stuff(task, &cputype, &addrs));
 
-    mach_vm_address_t stack_address = 0;
     TRY(mach_vm_allocate(task, &stack_address, stack_size, VM_FLAGS_ANYWHERE));
 
     mach_vm_address_t stack_end = stack_address + stack_size - 0x100;
@@ -325,7 +326,7 @@ kern_return_t inject(pid_t pid, const char *path) {
 
     memset(&state, 0, sizeof(state));
 
-    printf("dlopen = %llx\n", addrs.dlopen);
+    //printf("dlopen = %llx\n", addrs.dlopen);
 
     switch(cputype) {
 #ifdef __arm__
@@ -396,7 +397,7 @@ kern_return_t inject(pid_t pid, const char *path) {
     mach_msg_type_number_t em_count = 2;
 
     TRY(task_swap_exception_ports(task, EXC_MASK_BAD_ACCESS, exc, EXCEPTION_STATE_IDENTITY, state_flavor, em, &em_count, eh, eb, ef));
-    if(em_count > 1) FAIL(KERN_FAILURE);
+    ASSERTR(em_count <= 1, KERN_FAILURE);
 
     TRY(thread_set_state(thread, state_flavor, &state.nat, state_count));
 
@@ -408,13 +409,11 @@ kern_return_t inject(pid_t pid, const char *path) {
         struct exception_message msg;
         TRY(mach_msg_overwrite(NULL, MACH_RCV_MSG, 0, sizeof(msg), exc, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL, (void *) &msg, sizeof(msg)));
         //fprintf(stderr, "got a message\n");
-        if(!(msg.Head.msgh_bits & MACH_MSGH_BITS_COMPLEX) ||
-           (msg.msgh_body.msgh_descriptor_count == 0) ||
-           (msg.Head.msgh_size < offsetof(struct exception_message, old_state)) ||
-           (msg.old_stateCnt != state_count) ||
-           (msg.Head.msgh_size < offsetof(struct exception_message, old_state) + msg.old_stateCnt * sizeof(natural_t))) {
-            FAIL(KERN_FAILURE);
-        }
+        ASSERTR((msg.Head.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
+           (msg.msgh_body.msgh_descriptor_count != 0) &&
+           (msg.Head.msgh_size >= offsetof(struct exception_message, old_state)) &&
+           (msg.old_stateCnt == state_count) &&
+           (msg.Head.msgh_size >= offsetof(struct exception_message, old_state) + msg.old_stateCnt * sizeof(natural_t)), KERN_FAILURE);
         memcpy(&state, msg.old_state, sizeof(state));
 
         if(msg.thread.name == thread) {
@@ -439,7 +438,7 @@ kern_return_t inject(pid_t pid, const char *path) {
             if(!cond) {
                 // let the normal crash mechanism handle it
                 task_set_exception_ports(task, em[0], eh[0], eb[0], ef[0]);
-                FAIL(KERN_FAILURE);
+                ASSERTR(0, KERN_FAILURE);
             } else if(started_dlopen) {
                 TRY(thread_terminate(msg.thread.name));
                 break;
@@ -501,7 +500,6 @@ kern_return_t inject(pid_t pid, const char *path) {
         }
     }
 
-    kr = 0;
 bad:
     if(stack_address) vm_deallocate(task, stack_address, stack_size);
     if(thread) {
